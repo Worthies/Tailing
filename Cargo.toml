@@ -1,0 +1,13 @@
+[package]
+name = "tail"
+version = "0.1.0"
+edition = "2021"
+description = "A tail command that logs to systemd journal"
+license = "MIT"
+repository = "https://github.com/org/tailing"
+
+[dependencies]
+
+[[bin]]
+name = "tail"
+path = "src/main.rs"
