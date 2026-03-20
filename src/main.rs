@@ -1,12 +1,11 @@
 use std::env;
-use std::io::{self, BufRead, Write};
-// use std::os::unix::process::parent_id;
+use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
+
+const PIDFD_OPEN: libc::c_long = 434; // sys_pidfd_open
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
-    // let ppid = parent_id();
-    // let tag = format!("tail-{}", ppid);
     let tag = "tailing";
 
     eprintln!("logger tag: {} (example: journalctl -t {} -f)", tag, tag);
@@ -26,22 +25,72 @@ fn main() -> io::Result<()> {
         .stderr(Stdio::inherit())
         .spawn()?;
 
-    let stdin = io::stdin();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if let Some(ref mut jstdin) = journal_child.stdin {
-            writeln!(jstdin, "{}", line)?;
+    let tail_pid = tail_child.id();
+    let pidfd = unsafe { libc::syscall(PIDFD_OPEN, tail_pid as libc::pid_t, 0) as libc::c_int };
+    if pidfd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let stdin_fd = 0;
+
+    let mut tail_stdin = tail_child.stdin.take().unwrap();
+    let mut journal_stdin = journal_child.stdin.take().unwrap();
+    let mut stdin = io::stdin();
+
+    loop {
+        let mut pollfds = [
+            libc::pollfd {
+                fd: stdin_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: pidfd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+
+        unsafe {
+            if libc::poll(pollfds.as_mut_ptr(), 2, -1) < 0 {
+                break;
+            }
         }
-        if let Some(ref mut tstdin) = tail_child.stdin {
-            writeln!(tstdin, "{}", line)?;
+
+        // Check if tail process exited (pidfd is readable)
+        if pollfds[1].revents & libc::POLLIN != 0 {
+            break;
+        }
+
+        // Check if stdin has data
+        if pollfds[0].revents & libc::POLLIN != 0 {
+            let mut buf = [0u8; 4096];
+            match stdin.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tail_stdin.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                    let _ = journal_stdin.write_all(&buf[..n]);
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(_) => break,
+            }
+        }
+
+        // Check if stdin is closed (EOF)
+        if pollfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+            break;
         }
     }
 
-    drop(journal_child.stdin.take());
-    journal_child.wait()?;
+    drop(tail_stdin);
+    drop(journal_stdin);
+    drop(stdin);
+    unsafe { libc::close(pidfd) };
 
-    drop(tail_child.stdin.take());
-    tail_child.wait()?;
+    let _ = journal_child.wait();
+    let tail_status = tail_child.wait()?;
 
-    Ok(())
+    std::process::exit(tail_status.code().unwrap_or(0))
 }
