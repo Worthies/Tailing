@@ -8,7 +8,7 @@ fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
     let tag = "tailing";
 
-    eprintln!("logger tag: {} (example: journalctl -t {} -f)", tag, tag);
+    //eprintln!("logger tag: {} (example: journalctl -t {} -f)", tag, tag);
 
     let mut journal_child = Command::new("/usr/bin/logger")
         .arg("-t")
